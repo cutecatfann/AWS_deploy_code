@@ -1,0 +1,248 @@
+# Code to deploy a Highly Available Web App (HAWA) in AWS spanning two availabilitiy zones
+# NOTE: Please replace the names with actual names/values with your actual account values
+AWSTemplateFormatVersion: '2010-09-09' # Specifies the CloudFormation template version.
+
+Resources:
+  MyVPC:
+    Type: AWS::EC2::VPC # Creates a Virtual Private Cloud (VPC).
+    Properties:
+      CidrBlock: '10.0.0.0/16' # Specifies the CIDR block for the VPC.
+      EnableDnsSupport: true # Enables DNS support in the VPC.
+      EnableDnsHostnames: true # Enables DNS hostnames in the VPC.
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway # Creates an Internet Gateway to enable internet access.
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment # Attaches the Internet Gateway to the VPC.
+    Properties:
+      VpcId: !Ref MyVPC # Refers to the ID of the VPC.
+      InternetGatewayId: !Ref InternetGateway # Refers to the ID of the Internet Gateway.
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet # Creates a public subnet in the first availability zone.
+    Properties:
+      VpcId: !Ref MyVPC # Refers to the VPC where this subnet will be created.
+      CidrBlock: '10.0.0.0/24' # Specifies the CIDR block for the subnet.
+      MapPublicIpOnLaunch: true # Automatically assigns public IPs to instances in this subnet.
+      AvailabilityZone: 'us-east-1a' # Specifies the availability zone for the subnet.
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet # Creates a public subnet in the second availability zone.
+    Properties:
+      VpcId: !Ref MyVPC # Refers to the VPC where this subnet will be created.
+      CidrBlock: '10.0.1.0/24' # Specifies the CIDR block for the subnet.
+      MapPublicIpOnLaunch: true # Automatically assigns public IPs to instances in this subnet.
+      AvailabilityZone: 'us-east-1b' # Specifies the availability zone for the subnet.
+
+  MyEC2Instance1:
+    Type: AWS::EC2::Instance # Creates the first EC2 instance.
+    Properties:
+      InstanceType: t2.micro # Specifies the instance type.
+      ImageId: ami-xxxxxxxxxxxxxxxxx # Specifies the AMI ID for the instance.
+      SubnetId: !Ref PublicSubnet1 # Launches the instance in PublicSubnet1.
+      KeyName: YourKeyPairName # Specifies the key pair for SSH access.
+      BlockDeviceMappings: # Defines block storage configuration.
+        - DeviceName: /dev/sdf # Specifies the device name for the volume.
+          Ebs:
+            VolumeSize: 10 # Specifies the volume size in GiB.
+
+  MyEC2Instance2:
+    Type: AWS::EC2::Instance # Creates the second EC2 instance.
+    Properties:
+      InstanceType: t2.micro # Specifies the instance type.
+      ImageId: ami-xxxxxxxxxxxxxxxxx # Specifies the AMI ID for the instance.
+      SubnetId: !Ref PublicSubnet2 # Launches the instance in PublicSubnet2.
+      KeyName: YourKeyPairName # Specifies the key pair for SSH access.
+      BlockDeviceMappings: # Defines block storage configuration.
+        - DeviceName: /dev/sdf # Specifies the device name for the volume.
+          Ebs:
+            VolumeSize: 10 # Specifies the volume size in GiB.
+
+  LaunchConfiguration:
+    Type: AWS::AutoScaling::LaunchConfiguration # Defines a launch configuration for the Auto Scaling group.
+    Properties:
+      InstanceType: t2.micro # Specifies the instance type for the Auto Scaling group.
+      ImageId: ami-xxxxxxxxxxxxxxxxx # Specifies the AMI ID for instances launched by the group.
+      KeyName: YourKeyPairName # Specifies the key pair for SSH access.
+      SecurityGroups: [] # Add security group references here if needed.
+      BlockDeviceMappings: # Defines block storage configuration.
+        - DeviceName: /dev/sdf
+          Ebs:
+            VolumeSize: 10 # Specifies the volume size in GiB.
+
+# The Application Load Balancer (ALB) does not require an explicit attachment to the Auto Scaling group via a resource like AWS::AutoScaling::ScalingPolicy. Instead, the connection between the Auto Scaling group and the ALB happens through the Target Group.
+
+# Here’s how the interaction works:
+
+# Target Group:
+
+# The Target Group (AWS::ElasticLoadBalancingV2::TargetGroup) specifies where the ALB should forward incoming traffic.
+# It uses TargetType: instance, meaning the instances in the Auto Scaling group are added to the Target Group automatically when launched.
+# Auto Scaling Group (ASG):
+
+# The Auto Scaling group does not need a scaling policy for attaching instances to the Target Group. As long as the Target Group's ARN is included in the TargetGroupARNs property of the ASG, new instances are automatically registered with the Target Group.
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup # Creates an Auto Scaling group.
+    Properties:
+      VPCZoneIdentifier: # Specifies the subnets where the instances will be launched.
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      LaunchConfigurationName: !Ref LaunchConfiguration # Refers to the launch configuration.
+      MinSize: 2 # Specifies the minimum number of instances in the group.
+      MaxSize: 4 # Specifies the maximum number of instances in the group.
+      DesiredCapacity: 2 # Specifies the desired number of instances.
+      TargetGroupARNs: [] # Add target group ARNs here if attaching to a load balancer.
+
+  ScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy # Defines a scaling policy for the Auto Scaling group.
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup # Refers to the Auto Scaling group.
+      PolicyType: TargetTrackingScaling # Sets the policy type to target tracking.
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization # Uses average CPU utilization as the metric.
+        TargetValue: 50.0 # Scales instances to maintain an average CPU utilization of 50%.
+
+  # Configures an Application Load Balancer that spans both public subnets.
+  # It is internet-facing to accept traffic from the internet.
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer # Creates an Application Load Balancer.
+    Properties:
+      Name: MyAppLoadBalancer # Optional, gives a name to the ALB.
+      Scheme: internet-facing # Specifies that the ALB is publicly accessible.
+      Subnets: # Specifies the subnets for the ALB.
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups: [] # Add a security group reference for ALB.
+
+  # Defines a group of EC2 instances as targets, using the Auto Scaling group's instances.
+  # Includes settings for health checks and routing traffic to port 80.
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup # Defines a target group for the Auto Scaling instances.
+    Properties:
+      Name: MyAppTargetGroup # Optional, gives a name to the target group.
+      TargetType: instance # Specifies that targets are EC2 instances.
+      Protocol: HTTP # Defines the protocol used for health checks and traffic.
+      Port: 80 # The port instances are listening on.
+      VpcId: !Ref MyVPC # Specifies the VPC where the target group is created.
+      HealthCheckProtocol: HTTP # Configures health checks for targets.
+      HealthCheckPath: / # The path used for health checks (e.g., root of the app).
+      HealthCheckIntervalSeconds: 30 # Time between health checks.
+      HealthCheckTimeoutSeconds: 5 # Timeout for health check responses.
+      HealthyThresholdCount: 2 # Consecutive successful checks to mark a target healthy.
+      UnhealthyThresholdCount: 2 # Consecutive failed checks to mark a target unhealthy.
+
+  # Configures the ALB to listen for incoming HTTP traffic on port 80.
+  # Forwards this traffic to the specified TargetGroup.
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener # Creates a listener for the ALB.
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer # Attaches the listener to the ALB.
+      Protocol: HTTP # Specifies the listener protocol.
+      Port: 80 # The port the listener listens on.
+      DefaultActions: # Configures the default action for incoming requests.
+        - Type: forward # Forwards traffic to the target group.
+          TargetGroupArn: !Ref TargetGroup # Refers to the created target group.
+
+  # Autoscales when the CPU utilization is > 60% average across the instances
+  CPUScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy # Defines a scaling policy for the Auto Scaling group.
+    Properties:
+      AutoScalingGroupName: !Ref AutoScalingGroup # Associates the policy with the Auto Scaling group.
+      PolicyType: TargetTrackingScaling # Sets the policy to target tracking.
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization # Uses average CPU utilization as the metric.
+        TargetValue: 60.0 # Triggers scaling when average CPU utilization exceeds 60%.
+
+  # Launched in a private subnet for security purposes
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet # Creates a private subnet for the RDS instance.
+    Properties:
+      VpcId: !Ref MyVPC # Refers to the existing VPC.
+      CidrBlock: '10.0.2.0/24' # Specifies the CIDR block for the private subnet.
+      MapPublicIpOnLaunch: false # Ensures instances in this subnet do not receive public IPs.
+      AvailabilityZone: 'us-east-1a' # Specifies the availability zone.
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup # Defines a DB subnet group for the RDS instance.
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS instance.
+        SubnetIds:
+          - !Ref PrivateSubnet # Original private subnet.
+          - !Ref PrivateSubnetReplica # New private subnet for the replica.
+
+
+  MySQLRDSInstance:
+    Type: AWS::RDS::DBInstance # Creates the RDS MySQL database instance.
+    Properties:
+      DBInstanceClass: db.t3.micro # Specifies the instance class for RDS.
+      AllocatedStorage: 20 # Allocates 20 GiB of storage.
+      Engine: MySQL # Sets the database engine to MySQL.
+      EngineVersion: '8.0' # Specifies the MySQL version.
+      MasterUsername: admin # Sets the master username for the database.
+      MasterUserPassword: Password1234 # Sets the master user password. Replace with a secure value.
+      DBSubnetGroupName: !Ref DBSubnetGroup # Associates the RDS instance with the DB subnet group.
+            VPCSecurityGroups:
+        - !Ref RDSInstanceSecurityGroup # Add a reference to an existing security group for RDS.
+      MultiAZ: false # Ensures single availability zone deployment for simplicity.
+      PubliclyAccessible: false # Prevents the RDS instance from being publicly accessible.
+
+# Restricts access to the RDS instance to only those instances using the ApplicationSecurityGroup.
+# Allows inbound MySQL traffic (TCP on port 3306).
+  RDSInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup # Creates a security group for the RDS instance.
+    Properties:
+      GroupDescription: Allow MySQL access to RDS # Describes the purpose of the security group.
+      VpcId: !Ref MyVPC # Refers to the VPC where the security group will be created.
+      SecurityGroupIngress: # Defines inbound traffic rules.
+        - IpProtocol: tcp # Specifies the protocol (TCP for MySQL).
+          FromPort: 3306 # Start of the port range (3306 for MySQL).
+          ToPort: 3306 # End of the port range.
+          SourceSecurityGroupId: !Ref ApplicationSecurityGroup # Allows access from the application instances (define this separately).
+      SecurityGroupEgress: # Defines outbound traffic rules.
+        - IpProtocol: -1 # Allows all outbound protocols.
+          CidrIp: 0.0.0.0/0 # Allows outbound traffic to all destinations.
+
+# Represents the security group for application servers.
+# Allows inbound HTTP/HTTPS traffic (for typical web server setups).
+# This SG is referenced as the source for the RDSInstanceSecurityGroup.
+  ApplicationSecurityGroup:
+    Type: AWS::EC2::SecurityGroup # Creates a security group for application servers (if not already created).
+    Properties:
+      GroupDescription: Allow HTTP/HTTPS and outbound traffic # Describes the purpose of the application security group.
+      VpcId: !Ref MyVPC # Refers to the VPC where the security group will be created.
+      SecurityGroupIngress: # Defines inbound traffic rules.
+        - IpProtocol: tcp # Specifies the protocol (TCP for HTTP).
+          FromPort: 80 # Allows inbound traffic on port 80 (HTTP).
+          ToPort: 80
+          CidrIp: 0.0.0.0/0 # Allows inbound traffic from anywhere.
+        - IpProtocol: tcp # Specifies the protocol (TCP for HTTPS).
+          FromPort: 443 # Allows inbound traffic on port 443 (HTTPS).
+          ToPort: 443
+          CidrIp: 0.0.0.0/0 # Allows inbound traffic from anywhere.
+      SecurityGroupEgress: # Defines outbound traffic rules.
+        - IpProtocol: -1 # Allows all outbound protocols.
+          CidrIp: 0.0.0.0/0 # Allows outbound traffic to all destinations.
+
+# Creates a read replica in the second availability zone:
+  PrivateSubnetReplica:
+    Type: AWS::EC2::Subnet # Creates a private subnet for the read replica.
+    Properties:
+      VpcId: !Ref MyVPC # Refers to the existing VPC.
+      CidrBlock: '10.0.3.0/24' # Specifies the CIDR block for the second private subnet.
+      MapPublicIpOnLaunch: false # Ensures instances in this subnet do not receive public IPs.
+      AvailabilityZone: 'us-east-1b' # Specifies the second Availability Zone.
+
+  MySQLReadReplica:
+    Type: AWS::RDS::DBInstance # Creates a read replica of the primary RDS instance.
+    Properties:
+      SourceDBInstanceIdentifier: !Ref MySQLRDSInstance # Specifies the primary RDS instance to replicate.
+      DBInstanceClass: db.t3.micro # Defines the instance class for the read replica.
+      Engine: MySQL # Matches the engine of the primary database.
+      DBSubnetGroupName: !Ref DBSubnetGroup # Associates the read replica with the updated DB subnet group.
+      VPCSecurityGroups:
+        - !Ref RDSInstanceSecurityGroup # Uses the same security group as the primary RDS instance.
+      PubliclyAccessible: false # Ensures the read replica is not publicly accessible.
+      AvailabilityZone: 'us-east-1b' # Places the read replica in the second Availability Zone.
